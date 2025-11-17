@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="WFP Jijiga AO – Process Monitoring Cleaner & Tableau Prep",
+    page_title="WFP Jijiga AO – Process Monitoring Cleaner & Tableau Prep v3",
     layout="wide"
 )
 
@@ -16,13 +16,18 @@ SYSTEM_NAMES = {
     "starttime","endtime","deviceid","today"
 }
 
-META_PATTERNS = [
-    "region","sub office","sub_office","zone","woreda","wereda","kebele",
-    "village","camp","fdp","distribution point","health facility","tsfp",
-    "market","partner","implementing partner","cooperating partner",
-    "date","monitoring month","monitoring year","collected by",
-    "enumerator","latitude","longitude","altitude","gps"
-]
+def dedupe_columns(cols):
+    """Ensure column names are unique by appending suffixes when needed."""
+    seen = {}
+    new_cols = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 0
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_cols.append(f"{c}_{seen[c]}")
+    return new_cols
 
 def is_system_column(col: str) -> bool:
     low = col.lower().strip()
@@ -74,7 +79,7 @@ def standardize_column_name(col: str) -> str:
     if "altitude" in low:
         return "gps_alt"
     # default: cleaned snake_case
-    cleaned = re.sub(r"[^0-9a-zA-Z]+","_", low).strip("_")
+    cleaned = re.sub(r"[^0-9a-zA-Z]+","", low).strip("")
     return cleaned
 
 def classify_meta_columns(columns):
@@ -82,7 +87,11 @@ def classify_meta_columns(columns):
     indicator = []
     for c in columns:
         low = c.lower()
-        if any(p in low for p in ["region","zone","wereda","woreda","kebele","village","camp","fdp","market","tsfp","partner","date","month","year","enumerator","latitude","longitude","altitude"]):
+        if any(p in low for p in [
+            "region","zone","wereda","woreda","kebele","village","camp",
+            "fdp","market","tsfp","partner","date","month","year",
+            "enumerator","latitude","longitude","altitude"
+        ]):
             meta.append(c)
         else:
             indicator.append(c)
@@ -98,23 +107,25 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ---------- Sidebar / Help ----------
 
 with st.sidebar:
-    st.title("ℹ️ Help / Information")
-    st.markdown("**WFP Jijiga Area Office – M&E Unit**")
+    st.title("ℹ Help / Information")
+    st.markdown("*WFP Jijiga Area Office – M&E Unit*")
     st.markdown(
         "- Upload raw MoDA / Excel / CSV process monitoring exports.\n"
-        "- The app will remove Kobo/system fields, standardize key columns, and optionally create a Tableau-ready long-format file.\n"
+        "- The app will remove Kobo/system fields, standardize key columns, "
+        "deduplicate duplicated column names, and optionally create a Tableau-ready long-format file.\n"
         "- You can download both the cleaned wide file and the long-format file."
     )
     with st.expander("How does the cleaning work?", expanded=False):
         st.markdown(
-            "- Drops Kobo/system columns (e.g. `_id`, `_uuid`, `_submission_time`, `starttime`, `endtime`).\n"
-            "- Tries to standardize location fields to: `region`, `sub_office`, `zone`, `woreda`, `kebele`, `village`, `fdp_name`, `tsfp_center`, `market_name`.\n"
-            "- Tries to standardize partner and date fields to: `partner_name`, `visit_date`, `monitoring_year`, `monitoring_month`.\n"
-            "- Long format uses all non-metadata fields as indicators and melts them into `indicator_name` / `indicator_value`."
+            "- Drops Kobo/system columns (e.g. _id, _uuid, _submission_time, starttime, endtime).\n"
+            "- Automatically renames duplicate column names by appending suffixes like _1, _2.\n"
+            "- Tries to standardize location fields to: region, sub_office, zone, woreda, kebele, village, fdp_name, tsfp_center, market_name.\n"
+            "- Tries to standardize partner and date fields to: partner_name, visit_date, monitoring_year, monitoring_month.\n"
+            "- Long format uses all non-metadata fields as indicators and melts them into indicator_name / indicator_value."
         )
 
-st.markdown("<h1 style='color:#0072BC;'>WFP Jijiga – Process Monitoring Cleaner & Tableau Prep v2</h1>", unsafe_allow_html=True)
-st.caption("Standalone app for MoDA/Excel process monitoring data – cleaning, renaming, and Tableau-ready reshaping.")
+st.markdown("<h1 style='color:#0072BC;'>WFP Jijiga – Process Monitoring Cleaner & Tableau Prep v3</h1>", unsafe_allow_html=True)
+st.caption("Standalone app for MoDA/Excel process monitoring data – cleaning, deduplicating columns, renaming, and Tableau-ready reshaping.")
 
 uploaded = st.file_uploader(
     "📁 Upload MoDA / Excel / CSV Process Monitoring File",
@@ -125,6 +136,7 @@ if uploaded is not None:
     st.success(f"Uploaded: {uploaded.name}")
     filetype = "csv" if uploaded.name.lower().endswith(".csv") else "excel"
 
+    # Load file
     if filetype == "excel":
         xls = pd.ExcelFile(uploaded)
         sheet_name = st.selectbox("Select sheet to process", xls.sheet_names)
@@ -133,7 +145,13 @@ if uploaded is not None:
         sheet_name = None
         df_raw = pd.read_csv(uploaded)
 
-    st.write("### 🔍 Raw Preview")
+    # Deduplicate column names
+    duplicate_flag = df_raw.columns.duplicated().any()
+    if duplicate_flag:
+        df_raw.columns = dedupe_columns(df_raw.columns)
+        st.warning("Duplicate column names were found and have been automatically renamed with suffixes (e.g. '_1', '_2').")
+
+    st.write("### 🔍 Raw Preview (after deduplicating column names if needed)")
     st.dataframe(df_raw.head())
 
     drop_system = st.checkbox("Drop Kobo/system fields (recommended)", value=True)
@@ -141,7 +159,6 @@ if uploaded is not None:
     make_long = st.checkbox("Generate Tableau-ready long-format dataset", value=True)
 
     log_lines = []
-
     df = df_raw.copy()
 
     # Drop system columns
@@ -154,25 +171,22 @@ if uploaded is not None:
 
     # Standardize names
     if do_standardize:
-        new_cols = {}
-        for c in df.columns:
-            new_cols[c] = standardize_column_name(c)
+        new_cols = {c: standardize_column_name(c) for c in df.columns}
         df.rename(columns=new_cols, inplace=True)
         log_lines.append("Standardized column names to snake_case and aligned key metadata fields (region, woreda, partner_name, etc.).")
 
     st.write("### ✅ Cleaned (Wide) Preview")
     st.dataframe(df.head())
 
-    # Decide meta vs indicator columns
+    # Meta vs indicator split
     meta_cols, indicator_cols = classify_meta_columns(df.columns.tolist())
-    # ensure meta_cols at least includes some known ones if present
-    for c in ["region","sub_office","zone","woreda","kebele","village","fdp_name","tsfp_center","market_name","partner_name","visit_date","enumerator"]:
+    for c in ["region","sub_office","zone","woreda","kebele","village","fdp_name",
+              "tsfp_center","market_name","partner_name","visit_date","enumerator"]:
         if c in df.columns and c not in meta_cols:
             meta_cols.append(c)
             if c in indicator_cols:
                 indicator_cols.remove(c)
-
-    meta_cols = sorted(list(dict.fromkeys(meta_cols)))  # unique & stable
+    meta_cols = sorted(list(dict.fromkeys(meta_cols)))
 
     st.write("#### 🧩 Detected metadata fields")
     st.code(", ".join(meta_cols) if meta_cols else "None detected – the app will treat all fields as indicators for long-format.")
@@ -185,7 +199,9 @@ if uploaded is not None:
             meta_use = meta_cols
 
         indicator_use = [c for c in df.columns if c not in meta_use]
-        log_lines.append(f"Identified {len(meta_use)} metadata columns and {len(indicator_use)} indicator columns for long-format reshaping.")
+        log_lines.append(
+            f"Identified {len(meta_use)} metadata columns and {len(indicator_use)} indicator columns for long-format reshaping."
+        )
 
         if indicator_use:
             df_long = df.melt(
@@ -203,40 +219,39 @@ if uploaded is not None:
     # Downloads
     st.markdown("### 💾 Downloads")
 
-    # Wide cleaned Excel
     wide_bytes = to_excel_bytes(df)
     wide_name = "PM_Cleaned_Wide.xlsx" if sheet_name is None else f"PM_Cleaned_Wide_{sheet_name}.xlsx"
     st.download_button(
-        "⬇️ Download Cleaned Wide File (Excel)",
+        "⬇ Download Cleaned Wide File (Excel)",
         data=wide_bytes,
         file_name=wide_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # Long-format CSV
-    if make_long and df_long is not None:
+    if make_long and 'df_long' in locals() and df_long is not None:
         long_csv = df_long.to_csv(index=False).encode("utf-8")
         long_name = "PM_LongFormat_Tableau.csv" if sheet_name is None else f"PM_LongFormat_Tableau_{sheet_name}.csv"
         st.download_button(
-            "⬇️ Download Tableau-ready Long Format (CSV)",
+            "⬇ Download Tableau-ready Long Format (CSV)",
             data=long_csv,
             file_name=long_name,
             mime="text/csv"
         )
 
-    # Logs
     st.write("### 📝 Processing Log")
+    if duplicate_flag:
+        log_lines.insert(0, "Detected duplicate column names in the input; renamed with numeric suffixes to make them unique.")
     if log_lines:
-        st.write("\n".join(f"- {ln}" for ln in log_lines))
+        st.write("\\n".join(f"- {ln}" for ln in log_lines))
     else:
         st.write("No transformations applied.")
 
 else:
     st.info("Upload a MoDA/Excel/CSV file to begin cleaning and reshaping.")
 
-st.markdown("""---
+st.markdown(\"\"\"---
 <div style="font-size:0.9rem; color:#555;">
 <strong>WFP Jijiga Area Office – M&E Unit (RAM)</strong><br>
-Process Monitoring Data Cleaning & Tableau Preparation Utility – Streamlit App v2
+Process Monitoring Data Cleaning & Tableau Preparation Utility – Streamlit App v3
 </div>
-""", unsafe_allow_html=True)
+\"\"\", unsafe_allow_html=True)
